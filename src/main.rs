@@ -34,6 +34,18 @@ impl Default for Transaction {
     }
 }
 
+pub fn is_valid_transaction(transaction: Transaction) -> bool {
+    let def_date = NaiveDateTime::new(
+        NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
+        NaiveTime::from_hms_opt(0, 0, 0).unwrap(),
+    );
+
+    if transaction.date==def_date || transaction.amount==0.0 {
+        return false;
+    }
+    return true;
+}
+
 // Parse the pdf and return a list of transactions.
 pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error> {
     let file = pdfFile::<Vec<u8>>::open_password(path.clone(), _password.as_bytes())
@@ -53,6 +65,7 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
                     let mut header_assigned = false;
                     let mut header_column_ct = 0;
                     let mut prev_value = "";
+                    let mut prev_points = -1;
 
                     for op in ops.iter().skip_while(|op| match op {
                         Op::TextDraw { ref text } => {
@@ -81,18 +94,18 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
 
                                         // XXX: assume the transaction row starts with a date.
                                         let parsed_datetime =
-                                            NaiveDateTime::parse_from_str(d, "%d/%m/%Y %H:%M:%S")
-                                                .or_else(|_| {
-                                                    NaiveDate::parse_from_str(d, "%d/%m/%Y").map(
-                                                        |date| {
-                                                            NaiveDateTime::new(
-                                                                date,
-                                                                NaiveTime::from_hms_opt(0, 0, 0)
-                                                                    .unwrap(),
-                                                            )
-                                                        },
+                                        NaiveDateTime::parse_from_str(d, "%d/%m/%Y %H:%M:%S")
+                                        .or_else(|_| {
+                                            NaiveDate::parse_from_str(d, "%d/%m/%Y").map(
+                                                |date| {
+                                                    NaiveDateTime::new(
+                                                        date,
+                                                        NaiveTime::from_hms_opt(0, 0, 0)
+                                                        .unwrap(),
                                                     )
-                                                });
+                                                },
+                                            )
+                                        });
 
                                         match parsed_datetime {
                                             Ok(_) => {
@@ -101,7 +114,13 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
                                                 header_column_ct -= 1;
                                                 prev_value = "";
                                             }
-                                            Err(_) => continue,
+                                            Err(_) => {
+                                                // some statements have points before date
+                                                if let Ok(p) = d.parse::<i32>() {
+                                                    prev_points = p;
+                                                }
+                                                continue;
+                                            }
                                         }
                                     }
 
@@ -134,6 +153,17 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
                                         }
                                     }
 
+                                    // assume transaction begins with date
+                                    // skip if this is not a transaction row.
+                                    if column_ct == 1 && !found_row {
+                                        // some statements have points before date
+                                        if let Ok(p) = d.parse::<i32>() {
+                                            prev_points = p;
+                                        }
+                                        column_ct = 0; // reset column count for next row
+                                        continue;
+                                    }
+
                                     if column_ct > 2 && d.contains(".") {
                                         if let Ok(amt) = d.replace(",", "").parse::<f32>() {
                                             transaction.amount = amt * -1.0;
@@ -150,7 +180,7 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
 
                                         // skip reward points
                                         if let Ok(p) = tx.replace("- ", "-").parse::<i32>() {
-                                            transaction.points = p;
+                                            prev_points = p;
                                             continue;
                                         }
 
@@ -163,6 +193,7 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
                                         // assume transaction description to be next to date
                                         if column_ct == 2 {
                                             transaction.tx = tx;
+                                            continue;
                                         }
                                     }
                                 }
@@ -175,7 +206,14 @@ pub fn parse(path: String, _password: String) -> Result<Vec<Transaction>, Error>
                             }
 
                             Op::EndText => {
-                                if found_row && column_ct == header_column_ct {
+                                // if found_row && column_ct == header_column_ct {
+                                let temp_transaction = transaction.clone();
+                                if found_row && is_valid_transaction(temp_transaction) {
+                                    // assign points before pushing because it doesn't seem to follow the header order
+                                    if transaction.points==0 && prev_points > 0 {
+                                        transaction.points = prev_points;
+                                        prev_points = -1;
+                                    }
                                     // push transaction here
                                     members.push(transaction.clone());
 
